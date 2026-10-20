@@ -1,0 +1,31 @@
+
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: tasks
+    ports:
+      - "5432:5432"
+    volumes:
+      - taskdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d tasks"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://postgres:dev@db:5432/tasks
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  taskdata:
+    external: true

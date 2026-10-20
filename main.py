@@ -1,5 +1,5 @@
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 app = FastAPI(
@@ -49,3 +49,36 @@ def get_task(task_id: int):
         status_code=404,
         content={"error": f"Task {task_id} not found"},
     )
+
+
+@app.post("/tasks", status_code=201, tags=["Tasks"], summary="Create a task")
+async def create_task(request: Request):
+    """Create a task after validating the request body."""
+    try:
+        data = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Request body must contain valid JSON"},
+        )
+
+    if not isinstance(data, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Request body must be a JSON object"},
+        )
+
+    title = data.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Title is required and must be a non-empty string"},
+        )
+
+    task = {
+        "id": max((task["id"] for task in tasks), default=0) + 1,
+        "title": title.strip(),
+        "done": False,
+    }
+    tasks.append(task)
+    return JSONResponse(status_code=201, content=task)

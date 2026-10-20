@@ -1,11 +1,12 @@
+"""FastAPI application backed by SQLite."""
 
-"""FastAPI application backed by a persistent SQLite database."""
-
+import json
 import sqlite3
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -113,8 +114,8 @@ def get_tasks() -> list[dict]:
 
 
 @app.get("/tasks/{task_id}")
-def get_task(task_id: int) -> dict:
-    """Return one task or a 404 response when it does not exist."""
+def get_task(task_id: int):
+    """Return one task or a 404 response."""
     connection = get_connection()
 
     try:
@@ -124,11 +125,86 @@ def get_task(task_id: int) -> dict:
         ).fetchone()
 
         if row is None:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=404,
-                detail={"error": "Task not found"},
+                content={"error": "Task not found"},
             )
 
         return serialize_task(row)
+    finally:
+        connection.close()
+
+
+@app.post(
+    "/tasks",
+    status_code=201,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {
+                            "title": {"type": "string"},
+                            "done": {"type": "boolean", "default": False},
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def create_task(request: Request):
+    """Validate and persist a new task."""
+    try:
+        payload = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Invalid JSON body"},
+        )
+
+    if not isinstance(payload, dict):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Request body must be a JSON object"},
+        )
+
+    title = payload.get("title")
+
+    if not isinstance(title, str) or not title.strip():
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Title is required"},
+        )
+
+    done = payload.get("done", False)
+
+    if not isinstance(done, bool):
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Done must be a boolean"},
+        )
+
+    connection = get_connection()
+
+    try:
+        with connection:
+            cursor = connection.execute(
+                "INSERT INTO tasks (title, done) VALUES (?, ?)",
+                (title.strip(), int(done)),
+            )
+
+            row = connection.execute(
+                "SELECT id, title, done FROM tasks WHERE id = ?",
+                (cursor.lastrowid,),
+            ).fetchone()
+
+            return JSONResponse(
+                status_code=201,
+                content=serialize_task(row),
+            )
     finally:
         connection.close()

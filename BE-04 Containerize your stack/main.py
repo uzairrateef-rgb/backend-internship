@@ -5,14 +5,28 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
-import repository
+import os
+from redis import Redis
 
+import repository
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize PostgreSQL before serving requests."""
+    """Initialize PostgreSQL and verify Redis before serving requests."""
     repository.initialize_database()
-    yield
+
+    redis_client = Redis.from_url(
+        os.getenv("REDIS_URL", "redis://localhost:6379/0"),
+        decode_responses=True,
+    )
+
+    try:
+        if not redis_client.ping():
+            raise RuntimeError("Redis ping failed")
+        app.state.redis = redis_client
+        yield
+    finally:
+        redis_client.close()
 
 
 app = FastAPI(
@@ -43,14 +57,22 @@ def root():
 
 
 @app.get("/health", tags=["General"])
-def health_check():
+def health_check(request: Request):
     try:
-        repository.list_tasks()
-        return {"status": "ok", "database": "ok"}
+        repository.get_connection().close()
+        request.app.state.redis.ping()
+        return {
+            "status": "ok",
+            "database": "ok",
+            "redis": "ok",
+        }
     except Exception:
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "database": "unavailable"},
+            content={
+                "status": "error",
+                "database": "or redis unavailable",
+            },
         )
 
 

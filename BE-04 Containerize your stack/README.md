@@ -122,3 +122,30 @@ tasks table and its persisted records.
 - `.env` contains local configuration and must not be committed.
 - `.env.example` documents the required configuration.
 - The example database credentials are for local development only and should be replaced for production use.
+
+## Redis Integration
+
+Redis runs as a separate Docker Compose service. The API waits for
+Redis and PostgreSQL health checks before starting.
+
+- Redis URL: `redis://redis:6379/0` inside the Compose network
+- Redis health check: `redis-cli ping`
+- The FastAPI startup lifespan pings Redis before serving requests.
+- `GET /health` checks PostgreSQL and Redis.
+
+Verification:
+- `docker compose ps` showed Redis as healthy.
+- `docker compose exec redis redis-cli ping` returned `PONG`.
+- `GET /health` returned HTTP 200 with database and Redis status `ok`.
+
+## Index and Query Plan
+
+An index named `idx_tasks_done` is defined on `tasks(done)` to support
+queries filtering tasks by completion status.
+
+The actual `EXPLAIN ANALYZE` output before and after index creation is
+saved in `docs/index-explain-analyze.txt`.
+
+The seeded table is small, so PostgreSQL may prefer sequential scans
+even when the index exists. Execution-time differences on a table this
+small are not sufficient to claim a meaningful speed improvement.

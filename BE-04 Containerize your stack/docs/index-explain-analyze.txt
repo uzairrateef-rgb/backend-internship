@@ -1,0 +1,31 @@
+=== BEFORE: index dropped ===
+DROP INDEX
+ANALYZE
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Seq Scan on tasks  (cost=0.00..1.04 rows=1 width=30) (actual time=0.004..0.006 rows=1.00 loops=1)
+   Filter: done
+   Rows Removed by Filter: 3
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=13
+ Planning Time: 0.055 ms
+ Execution Time: 0.022 ms
+(8 rows)
+
+
+=== AFTER: index recreated ===
+CREATE INDEX
+ANALYZE
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Seq Scan on tasks  (cost=0.00..1.04 rows=1 width=30) (actual time=0.003..0.004 rows=1.00 loops=1)
+   Filter: done
+   Rows Removed by Filter: 3
+   Buffers: shared hit=1
+ Planning:
+   Buffers: shared hit=15 read=1
+ Planning Time: 0.051 ms
+ Execution Time: 0.018 ms
+(8 rows)
+

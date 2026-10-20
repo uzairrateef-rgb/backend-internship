@@ -3,3 +3,4 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT NOT NULL,
     done BOOLEAN NOT NULL DEFAULT FALSE
 );
+CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done);

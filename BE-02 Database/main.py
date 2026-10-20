@@ -1,4 +1,5 @@
-"""FastAPI application backed by SQLite."""
+
+"""FastAPI application backed by a persistent SQLite database."""
 
 import json
 import sqlite3
@@ -6,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -78,6 +79,22 @@ def serialize_task(row: sqlite3.Row) -> dict:
     }
 
 
+def error_response(status_code: int, message: str) -> JSONResponse:
+    """Return a consistent API error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": message},
+    )
+
+
+async def read_json_body(request: Request):
+    """Parse a JSON request body and return a clear validation error."""
+    try:
+        return await request.json(), None
+    except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+        return None, error_response(400, "Invalid JSON body")
+
+
 @app.get("/")
 def root() -> dict:
     """Return API information."""
@@ -107,7 +124,6 @@ def get_tasks() -> list[dict]:
         rows = connection.execute(
             "SELECT id, title, done FROM tasks ORDER BY id"
         ).fetchall()
-
         return [serialize_task(row) for row in rows]
     finally:
         connection.close()
@@ -125,10 +141,7 @@ def get_task(task_id: int):
         ).fetchone()
 
         if row is None:
-            return JSONResponse(
-                status_code=404,
-                content={"error": "Task not found"},
-            )
+            return error_response(404, "Task not found")
 
         return serialize_task(row)
     finally:
@@ -158,35 +171,20 @@ def get_task(task_id: int):
 )
 async def create_task(request: Request):
     """Validate and persist a new task."""
-    try:
-        payload = await request.json()
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid JSON body"},
-        )
+    payload, error = await read_json_body(request)
+    if error:
+        return error
 
     if not isinstance(payload, dict):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Request body must be a JSON object"},
-        )
+        return error_response(400, "Request body must be a JSON object")
 
     title = payload.get("title")
-
     if not isinstance(title, str) or not title.strip():
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Title is required"},
-        )
+        return error_response(400, "Title is required")
 
     done = payload.get("done", False)
-
     if not isinstance(done, bool):
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Done must be a boolean"},
-        )
+        return error_response(400, "Done must be a boolean")
 
     connection = get_connection()
 
@@ -196,7 +194,6 @@ async def create_task(request: Request):
                 "INSERT INTO tasks (title, done) VALUES (?, ?)",
                 (title.strip(), int(done)),
             )
-
             row = connection.execute(
                 "SELECT id, title, done FROM tasks WHERE id = ?",
                 (cursor.lastrowid,),
@@ -206,5 +203,99 @@ async def create_task(request: Request):
                 status_code=201,
                 content=serialize_task(row),
             )
+    finally:
+        connection.close()
+
+
+@app.put(
+    "/tasks/{task_id}",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "done": {"type": "boolean"},
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def update_task(task_id: int, request: Request):
+    """Update a task's title and/or completion status."""
+    payload, error = await read_json_body(request)
+    if error:
+        return error
+
+    if not isinstance(payload, dict):
+        return error_response(400, "Request body must be a JSON object")
+
+    if not payload or not set(payload).issubset({"title", "done"}):
+        return error_response(400, "Provide a valid title or done field")
+
+    updates = {}
+    if "title" in payload:
+        title = payload["title"]
+        if not isinstance(title, str) or not title.strip():
+            return error_response(400, "Title must be a non-empty string")
+        updates["title"] = title.strip()
+
+    if "done" in payload:
+        done = payload["done"]
+        if not isinstance(done, bool):
+            return error_response(400, "Done must be a boolean")
+        updates["done"] = int(done)
+
+    connection = get_connection()
+
+    try:
+        with connection:
+            existing = connection.execute(
+                "SELECT id FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+
+            if existing is None:
+                return error_response(404, "Task not found")
+
+            columns = ", ".join(f"{column} = ?" for column in updates)
+            values = list(updates.values()) + [task_id]
+
+            connection.execute(
+                f"UPDATE tasks SET {columns} WHERE id = ?",
+                values,
+            )
+
+            row = connection.execute(
+                "SELECT id, title, done FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+
+            return serialize_task(row)
+    finally:
+        connection.close()
+
+
+@app.delete("/tasks/{task_id}", status_code=204)
+def delete_task(task_id: int):
+    """Delete a task or return 404 if it does not exist."""
+    connection = get_connection()
+
+    try:
+        with connection:
+            cursor = connection.execute(
+                "DELETE FROM tasks WHERE id = ?",
+                (task_id,),
+            )
+
+            if cursor.rowcount == 0:
+                return error_response(404, "Task not found")
+
+        return Response(status_code=204)
     finally:
         connection.close()

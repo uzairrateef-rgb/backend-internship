@@ -55,7 +55,35 @@ def get_task(task_id: int):
     return task
 
 
-@app.post("/tasks", status_code=201, tags=["Tasks"], summary="Create a task")
+
+@app.post(
+    "/tasks",
+    status_code=201,
+    tags=["Tasks"],
+    summary="Create a task",
+    description="Create a task with a required, non-empty title.",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["title"],
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "minLength": 1,
+                                "example": "Buy milk",
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+
 async def create_task(request: Request):
     """Create a task after validating the request body."""
     try:
@@ -88,7 +116,37 @@ async def create_task(request: Request):
     return JSONResponse(status_code=201, content=task)
 
 
-@app.put("/tasks/{task_id}", tags=["Tasks"], summary="Update a task")
+
+@app.put(
+    "/tasks/{task_id}",
+    tags=["Tasks"],
+    summary="Update a task",
+    description="Update a task's title, completion status, or both.",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "example": "Finish API documentation",
+                            },
+                            "done": {
+                                "type": "boolean",
+                                "example": True,
+                            },
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+
 async def update_task(task_id: int, request: Request):
     """Update a task's title and/or completion status."""
     task = find_task(task_id)

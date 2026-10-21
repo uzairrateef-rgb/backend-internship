@@ -92,3 +92,9 @@ Protected endpoints require a valid Supabase access token in the `Authorization:
 ## Testing
 
 Use Swagger UI at `/docs` to test signup, login, public access, protected access, and logout. Authenticate through the Swagger **Authorize** control before testing protected routes.
+
+## Swagger UI Evidence
+
+The following screenshot shows the interactive API documentation for the authentication API.
+
+![BE-03 Auth Swagger UI](docs/swagger-auth.png)

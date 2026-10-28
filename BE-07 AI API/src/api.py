@@ -5,6 +5,11 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
+import random
+import time
+from email.utils import parsedate_to_datetime
+
+from openai import APIStatusError, APITimeoutError, InternalServerError, RateLimitError, OpenAI, OpenAIError
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
@@ -22,6 +27,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "book-enrichment-v1.md"
 PROMPT_VERSION = "book-enrichment-v1"
 QUARANTINE_PATH = PROJECT_ROOT / "logs" / "quarantine.jsonl"
+COST_LOG_PATH = PROJECT_ROOT / "logs" / "cost.jsonl"
 
 client = OpenAI(
     base_url=os.environ["LLM_BASE_URL"],
@@ -158,17 +164,110 @@ def quarantine_failure(
         file.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def request_model(messages: list[dict]) -> str:
-    """Make one model request and return its text response."""
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0,
-        max_tokens=300,
+def retry_after_seconds(error: APIStatusError) -> float | None:
+    """Read Retry-After as seconds or as an HTTP date."""
+    response = error.response
+    value = response.headers.get("retry-after")
+
+    if not value:
+        return None
+
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(value)
+            return max(
+                0.0,
+                (retry_at - datetime.now(timezone.utc)).total_seconds(),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def log_model_call(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    duration_ms: int,
+    repair_count: int,
+) -> None:
+    """Append usage and timing information as one JSONL record."""
+    COST_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "prompt_version": PROMPT_VERSION,
+        "model": MODEL,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "duration_ms": duration_ms,
+        "repair_count": repair_count,
+    }
+
+    with COST_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record) + "\n")
+
+
+def request_model(
+    messages: list[dict],
+    repair_count: int = 0,
+) -> str:
+    """Call the model with explicit retry rules and usage logging."""
+    delays = (1, 2, 4)
+    started = time.monotonic()
+
+    for attempt in range(4):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                temperature=0,
+                max_tokens=300,
+            )
+            break
+
+        except APITimeoutError:
+            if attempt == 3:
+                raise
+            time.sleep(delays[attempt] + random.uniform(0, 0.25))
+
+        except (RateLimitError, InternalServerError) as error:
+            if attempt == 3:
+                raise
+
+            retry_after = retry_after_seconds(error)
+            delay = (
+                retry_after
+                if retry_after is not None
+                else delays[attempt] + random.uniform(0, 0.25)
+            )
+            time.sleep(delay)
+
+        except APIStatusError as error:
+            # Retry other HTTP 5xx responses, but not 4xx responses.
+            if error.status_code < 500 or attempt == 3:
+                raise
+
+            retry_after = retry_after_seconds(error)
+            delay = (
+                retry_after
+                if retry_after is not None
+                else delays[attempt] + random.uniform(0, 0.25)
+            )
+            time.sleep(delay)
+
+    answer = response.choices[0].message.content or ""
+    usage = response.usage
+
+    log_model_call(
+        input_tokens=usage.prompt_tokens if usage else 0,
+        output_tokens=usage.completion_tokens if usage else 0,
+        duration_ms=round((time.monotonic() - started) * 1000),
+        repair_count=repair_count,
     )
 
-    answer = response.choices[0].message.content
-    return answer or ""
+    return answer
 
 
 def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
@@ -183,7 +282,13 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
         {"role": "user", "content": user_message},
     ]
 
-    raw_output = request_model(original_messages)
+    try:
+        raw_output = request_model(original_messages, repair_count=0)
+    except OpenAIError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "The model provider is temporarily unavailable."},
+        )
 
     try:
         return validate_model_output(raw_output)
@@ -202,10 +307,13 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
 
     repair_output = ""
     try:
-        repair_output = request_model([
+        repair_output = request_model(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": repair_message},
-        ])
+        ],
+    repair_count=1,
+)
         return validate_model_output(repair_output)
     except (ValueError, ValidationError, json.JSONDecodeError) as repair_error:
         quarantine_failure(
@@ -217,7 +325,11 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
             ),
             repair_output=repair_output,
         )
-
+    except OpenAIError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "The model provider is temporarily unavailable."},
+        )
         return JSONResponse(
             status_code=422,
             content={
@@ -229,6 +341,9 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
 
 @app.post("/enrich", response_model=None)
 def enrich_book(book: BookInput):
+    if os.getenv("LLM_ENABLED", "true").strip().lower() == "false":
+        return stub_enrichment(book)
+
     if os.getenv("LLM_STUB", "0") == "1":
         return stub_enrichment(book)
 

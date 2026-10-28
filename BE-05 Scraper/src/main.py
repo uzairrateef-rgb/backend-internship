@@ -8,6 +8,8 @@ from urllib.parse import urldefrag, urljoin, urlparse
 import json
 import re
 from pydantic import BaseModel, Field, HttpUrl, ValidationError, field_validator
+import os
+from time import perf_counter, sleep
 
 import requests
 from bs4 import BeautifulSoup
@@ -21,6 +23,12 @@ TIMEOUT_SECONDS = 10
 REQUEST_DELAY_SECONDS = 0.5
 MAX_CATALOGUE_PAGES = 3
 
+RUN_STATS = {
+    "pages_fetched": 0,
+    "cache_hits": 0,
+    "failed_pages": [],
+}
+
 USER_AGENT = (
     "FlyRankInternship-A9/1.0 "
     "(educational scraper; repository: "
@@ -29,35 +37,58 @@ USER_AGENT = (
 
 
 def fetch_html(url: str, cache_file: Path) -> tuple[str, bool]:
-    """Return HTML and whether it was read from cache."""
+    """Fetch HTML politely, retry transient failures once, and cache successes."""
     if cache_file.exists():
         html = cache_file.read_text(encoding="utf-8")
+        RUN_STATS["cache_hits"] += 1
         print(f"CACHE HIT url={url} bytes={len(html.encode('utf-8'))}")
         return html, True
 
-    sleep(REQUEST_DELAY_SECONDS)
-    response = requests.get(
-        url,
-        headers={"User-Agent": USER_AGENT},
-        timeout=TIMEOUT_SECONDS,
-    )
-    print(f"HTTP status={response.status_code} url={url}")
+    for attempt in range(2):
+        sleep(REQUEST_DELAY_SECONDS)
 
-    if response.status_code != 200:
-        response.raise_for_status()
-        raise RuntimeError(
-            f"Expected HTTP 200 for {url}, got {response.status_code}"
-        )
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": USER_AGENT},
+                timeout=TIMEOUT_SECONDS,
+            )
+            print(f"HTTP status={response.status_code} url={url}")
 
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    cache_file.write_bytes(response.content)
-    print(f"FETCH status=200 url={url} bytes={len(response.content)}")
+            if 500 <= response.status_code <= 599:
+                if attempt == 0:
+                    print(f"RETRY server error for {url}")
+                    sleep(1)
+                    continue
 
-    html = response.content.decode(
-        response.encoding or "utf-8",
-        errors="replace",
-    )
-    return html, False
+                response.raise_for_status()
+
+            if response.status_code != 200:
+                response.raise_for_status()
+                raise RuntimeError(
+                    f"Expected HTTP 200 for {url}, got {response.status_code}"
+                )
+
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_bytes(response.content)
+            RUN_STATS["pages_fetched"] += 1
+
+            print(f"FETCH status=200 url={url} bytes={len(response.content)}")
+
+            html = response.content.decode(
+                response.encoding or "utf-8",
+                errors="replace",
+            )
+            return html, False
+
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            if attempt == 0:
+                print(f"RETRY transient error for {url}: {exc}")
+                sleep(1)
+                continue
+            raise
+
+    raise RuntimeError(f"Fetch failed after retry: {url}")
 
 
 def catalogue_cache_path(page_number: int) -> Path:
@@ -256,38 +287,84 @@ def write_json(path: Path, data: list[dict]) -> None:
     )
 
 def main() -> None:
-    books = discover_books()
+    RUN_STATS["pages_fetched"] = 0
+    RUN_STATS["cache_hits"] = 0
+    RUN_STATS["failed_pages"] = []
+
+    started_at = datetime.now(timezone.utc)
+    timer_start = perf_counter()
     records = []
-    failed_pages = 0
+    valid_records = []
+    invalid_records = []
 
-    for index, book in enumerate(books, start=1):
-        try:
-            record = extract_book(
-                product_url=book["product_url"],
-                source_page=book["source_page"],
-            )
-            records.append(record)
-            print(f"EXTRACTED {index}/{len(books)}: {record['title']}")
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            failed_pages += 1
-            print(f"SKIPPED url={book['product_url']} reason={exc}")
+    try:
+        books = discover_books()
 
-    print(f"detail_pages={len(records)}")
-    print(f"failed_pages={failed_pages}")
+        # Test mode adds one deliberately invalid URL.
+        if os.getenv("SCRAPER_TEST_FAILURE") == "1":
+            books.append({
+                "product_url": (
+                    "https://books.toscrape.com/"
+                    "catalogue/this-book-does-not-exist/index.html"
+                ),
+                "source_page": CATALOGUE_URL,
+            })
 
-    valid_records, invalid_records = validate_records(records)
+        for index, book in enumerate(books, start=1):
+            try:
+                record = extract_book(
+                    product_url=book["product_url"],
+                    source_page=book["source_page"],
+                )
+                records.append(record)
+                print(f"EXTRACTED {index}/{len(books)}: {record['title']}")
 
-    write_json(PROJECT_ROOT / "output" / "books.json", valid_records)
-    write_json(PROJECT_ROOT / "output" / "errors.json", invalid_records)
+            except (
+                requests.RequestException,
+                RuntimeError,
+                ValueError,
+            ) as exc:
+                RUN_STATS["failed_pages"].append({
+                    "url": book["product_url"],
+                    "reason": str(exc),
+                })
+                print(
+                    f"SKIPPED url={book['product_url']} reason={exc}"
+                )
 
-    print(f"valid_records={len(valid_records)}")
-    print(f"invalid_records={len(invalid_records)}")
-    print(f"output/books.json: {len(valid_records)} records")
-    print(f"output/errors.json: {len(invalid_records)} errors")
+        valid_records, invalid_records = validate_records(records)
 
-    if records:
-        print("Sample raw record:")
-        print(records[0])
+        write_json(PROJECT_ROOT / "output" / "books.json", valid_records)
+        write_json(PROJECT_ROOT / "output" / "errors.json", invalid_records)
+
+        print(f"detail_pages={len(records)}")
+        print(f"valid_records={len(valid_records)}")
+        print(f"invalid_records={len(invalid_records)}")
+        print(f"failed_pages={len(RUN_STATS['failed_pages'])}")
+
+        if records:
+            print("Sample raw record:")
+            print(records[0])
+
+    finally:
+        duration_seconds = round(perf_counter() - timer_start, 3)
+
+        report = {
+            "started_at": started_at.isoformat(),
+            "duration_seconds": duration_seconds,
+            "pages_fetched": RUN_STATS["pages_fetched"],
+            "cache_hits": RUN_STATS["cache_hits"],
+            "valid_records": len(valid_records),
+            "invalid_records": len(invalid_records),
+            "failed_pages": RUN_STATS["failed_pages"],
+        }
+
+        write_json(
+            PROJECT_ROOT / "output" / "run-report.json",
+            report,
+        )
+
+        print("Run report written to output/run-report.json")
 
 
 if __name__ == "__main__":

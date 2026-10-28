@@ -5,6 +5,9 @@ from time import sleep
 from urllib.parse import urldefrag, urljoin
 import hashlib
 from urllib.parse import urldefrag, urljoin, urlparse
+import json
+import re
+from pydantic import BaseModel, Field, HttpUrl, ValidationError, field_validator
 
 import requests
 from bs4 import BeautifulSoup
@@ -182,6 +185,76 @@ def extract_book(
     }
 
 
+class BookRecord(BaseModel):
+    title: str = Field(min_length=1)
+    product_url: HttpUrl
+    price_text: str = Field(min_length=1)
+    price_gbp: float = Field(ge=0)
+    availability_text: str = Field(min_length=1)
+    rating_text: str | None = None
+    description: str | None = None
+    source_page: HttpUrl
+    fetched_at: datetime
+
+    @field_validator("title", "price_text", "availability_text")
+    @classmethod
+    def reject_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Field cannot be blank")
+        return value.strip()
+
+
+def normalize_price(price_text: str) -> float:
+    match = re.search(r"£\s*(\d+(?:\.\d{1,2})?)", price_text)
+
+    if not match:
+        raise ValueError(f"Could not parse GBP price: {price_text!r}")
+
+    return float(match.group(1))
+
+
+def validate_records(records: list[dict]) -> tuple[list[dict], list[dict]]:
+    valid_records = []
+    invalid_records = []
+    seen_urls = set()
+
+    for record in records:
+        try:
+            normalized = dict(record)
+
+            # Canonicalize product URL identity by removing fragments
+            # and normalizing the trailing slash.
+            normalized_url = normalized["product_url"].split("#", 1)[0]
+            normalized_url = normalized_url.rstrip("/") + "/"
+            normalized["product_url"] = normalized_url
+
+            if normalized_url in seen_urls:
+                continue
+
+            normalized["price_gbp"] = normalize_price(
+                normalized["price_text"]
+            )
+
+            validated = BookRecord.model_validate(normalized)
+            valid_records.append(validated.model_dump(mode="json"))
+            seen_urls.add(normalized_url)
+
+        except (ValidationError, ValueError, KeyError, TypeError) as exc:
+            invalid_records.append({
+                "record": record,
+                "reason": str(exc),
+            })
+
+    return valid_records, invalid_records
+
+
+def write_json(path: Path, data: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
 def main() -> None:
     books = discover_books()
     records = []
@@ -201,6 +274,16 @@ def main() -> None:
 
     print(f"detail_pages={len(records)}")
     print(f"failed_pages={failed_pages}")
+
+    valid_records, invalid_records = validate_records(records)
+
+    write_json(PROJECT_ROOT / "output" / "books.json", valid_records)
+    write_json(PROJECT_ROOT / "output" / "errors.json", invalid_records)
+
+    print(f"valid_records={len(valid_records)}")
+    print(f"invalid_records={len(invalid_records)}")
+    print(f"output/books.json: {len(valid_records)} records")
+    print(f"output/errors.json: {len(invalid_records)} errors")
 
     if records:
         print("Sample raw record:")

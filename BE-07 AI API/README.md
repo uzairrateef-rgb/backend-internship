@@ -95,3 +95,14 @@ The application uses these environment variables for its provider configuration:
 - `LLM_MODEL`
 
 The `.env` file contains local configuration and must not be committed. Use `.env.example` as the configuration template.
+
+## Stage 2 — Prompt v1 observations
+
+- Prompt file: `prompts/book-enrichment-v1.md`
+- Prompt version: `book-enrichment-v1`
+- Model: `nvidia/nemotron-3.5-content-safety` or the model configured in `.env`
+- Temperature: `0`
+
+### Three real inputs
+
+Record the actual output for each of the three test cases, and note anything surprising about the category, summary, confidence, or quality flags.

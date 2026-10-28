@@ -1,24 +1,27 @@
-import os
-from enum import Enum
-from typing import Annotated
+
 import json
+import os
+from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi.responses import PlainTextResponse
-from openai import OpenAI
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from openai import OpenAI
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 app = FastAPI(title="Book Record Enrichment API")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 PROMPT_PATH = PROJECT_ROOT / "prompts" / "book-enrichment-v1.md"
 PROMPT_VERSION = "book-enrichment-v1"
+QUARANTINE_PATH = PROJECT_ROOT / "logs" / "quarantine.jsonl"
 
 client = OpenAI(
     base_url=os.environ["LLM_BASE_URL"],
@@ -96,37 +99,137 @@ def stub_enrichment(book: BookInput) -> BookEnrichment:
     )
 
 
-@app.post("/enrich", response_model=None)
-def enrich_book(book: BookInput):
-    if os.getenv("LLM_STUB", "0") == "1":
-        return stub_enrichment(book)
+def parse_json_object(raw_output: str) -> dict:
+    """Parse a JSON object, allowing Markdown fences or surrounding text."""
+    text = raw_output.strip()
 
-    system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    # First, try the entire response as JSON.
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+        raise ValueError("The JSON response must be an object.")
+    except json.JSONDecodeError:
+        pass
 
-    user_message = json.dumps(
-        book.model_dump(),
-        ensure_ascii=False,
-    )
+    # If the model wrapped JSON in text or Markdown, find a JSON object.
+    decoder = json.JSONDecoder()
+    for position, character in enumerate(text):
+        if character != "{":
+            continue
 
+        try:
+            parsed, _ = decoder.raw_decode(text[position:])
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed, dict):
+            return parsed
+
+    raise ValueError("No valid JSON object was found in the model response.")
+
+
+def validate_model_output(raw_output: str) -> BookEnrichment:
+    """Parse model text and validate every output field against the schema."""
+    parsed = parse_json_object(raw_output)
+    return BookEnrichment.model_validate(parsed)
+
+
+def quarantine_failure(
+    book: BookInput,
+    raw_output: str,
+    validation_error: str,
+    repair_output: str,
+) -> None:
+    """Append one JSON record for an output that failed both attempts."""
+    QUARANTINE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "prompt_version": PROMPT_VERSION,
+        "model": MODEL,
+        "input": book.model_dump(mode="json"),
+        "raw_output": raw_output,
+        "validation_error": validation_error,
+        "repair_output": repair_output,
+    }
+
+    with QUARANTINE_PATH.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def request_model(messages: list[dict]) -> str:
+    """Make one model request and return its text response."""
     response = client.chat.completions.create(
         model=MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": system_prompt,
-            },
-            {
-                "role": "user",
-                "content": user_message,
-            },
-        ],
+        messages=messages,
         temperature=0,
         max_tokens=300,
     )
 
     answer = response.choices[0].message.content
+    return answer or ""
 
-    if not answer:
-        raise RuntimeError("The model returned an empty response.")
 
-    return PlainTextResponse(answer)
+def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
+    system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
+    user_message = json.dumps(
+        book.model_dump(mode="json"),
+        ensure_ascii=False,
+    )
+
+    original_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+
+    raw_output = request_model(original_messages)
+
+    try:
+        return validate_model_output(raw_output)
+    except (ValueError, ValidationError, json.JSONDecodeError) as first_error:
+        validation_error = str(first_error)
+
+    # Exactly one repair request is allowed.
+    repair_message = (
+        "Your previous response did not satisfy the required JSON output. "
+        "Return only one corrected JSON object that follows the system prompt. "
+        "Do not add Markdown fences or commentary.\n\n"
+        f"Original input JSON:\n{user_message}\n\n"
+        f"Rejected model output:\n{raw_output}\n\n"
+        f"Exact parsing/validation error:\n{validation_error}"
+    )
+
+    repair_output = ""
+    try:
+        repair_output = request_model([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": repair_message},
+        ])
+        return validate_model_output(repair_output)
+    except (ValueError, ValidationError, json.JSONDecodeError) as repair_error:
+        quarantine_failure(
+            book=book,
+            raw_output=raw_output,
+            validation_error=(
+                f"First attempt: {validation_error}\n"
+                f"Repair attempt: {repair_error}"
+            ),
+            repair_output=repair_output,
+        )
+
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error": "Model output could not be validated after one repair attempt.",
+                "prompt_version": PROMPT_VERSION,
+            },
+        )
+
+
+@app.post("/enrich", response_model=None)
+def enrich_book(book: BookInput):
+    if os.getenv("LLM_STUB", "0") == "1":
+        return stub_enrichment(book)
+
+    return enrich_with_model(book)

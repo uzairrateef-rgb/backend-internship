@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Environment and editor
+.env
+.DS_Store
+.vscode/
+
+# Scraper cache: don't repeatedly download the same pages
+cache/
+
+# Generated output: keep sample JSON in Git, not all local artifacts
+output/*
+!output/.gitkeep

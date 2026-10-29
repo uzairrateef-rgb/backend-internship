@@ -223,7 +223,13 @@ def request_model(
                 model=MODEL,
                 messages=messages,
                 temperature=0,
-                max_tokens=300,
+                max_tokens=1000,
+                extra_body={
+                    "reasoning": {
+                        "effort": "low",
+                        "exclude": True,
+                    }
+                },
             )
             break
 
@@ -270,6 +276,7 @@ def request_model(
     return answer
 
 
+
 def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
     system_prompt = PROMPT_PATH.read_text(encoding="utf-8")
     user_message = json.dumps(
@@ -295,7 +302,6 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
     except (ValueError, ValidationError, json.JSONDecodeError) as first_error:
         validation_error = str(first_error)
 
-    # Exactly one repair request is allowed.
     repair_message = (
         "Your previous response did not satisfy the required JSON output. "
         "Return only one corrected JSON object that follows the system prompt. "
@@ -308,13 +314,14 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
     repair_output = ""
     try:
         repair_output = request_model(
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": repair_message},
-        ],
-    repair_count=1,
-)
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": repair_message},
+            ],
+            repair_count=1,
+        )
         return validate_model_output(repair_output)
+
     except (ValueError, ValidationError, json.JSONDecodeError) as repair_error:
         quarantine_failure(
             book=book,
@@ -325,17 +332,18 @@ def enrich_with_model(book: BookInput) -> BookEnrichment | JSONResponse:
             ),
             repair_output=repair_output,
         )
-    except OpenAIError:
-        return JSONResponse(
-            status_code=503,
-            content={"error": "The model provider is temporarily unavailable."},
-        )
         return JSONResponse(
             status_code=422,
             content={
                 "error": "Model output could not be validated after one repair attempt.",
                 "prompt_version": PROMPT_VERSION,
             },
+        )
+
+    except OpenAIError:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "The model provider is temporarily unavailable."},
         )
 
 

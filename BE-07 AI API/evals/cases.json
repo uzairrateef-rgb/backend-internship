@@ -1,0 +1,98 @@
+[
+  {
+    "id": "case-01",
+    "label": "Clear fiction",
+    "input": {
+      "title": "The Moonlit Garden",
+      "price_gbp": 12.99,
+      "availability_text": "In stock",
+      "description": "A fictional mystery about a gardener who discovers a hidden letter."
+    },
+    "expected_category": "fiction",
+    "expected_flags": []
+  },
+  {
+    "id": "case-02",
+    "label": "Clear non-fiction",
+    "input": {
+      "title": "Understanding the Solar System",
+      "price_gbp": 18.5,
+      "availability_text": "In stock",
+      "description": "An educational guide explaining planets, moons, stars, and the science of our solar system."
+    },
+    "expected_category": "non_fiction",
+    "expected_flags": []
+  },
+  {
+    "id": "case-03",
+    "label": "Children's book",
+    "input": {
+      "title": "Bedtime Tales for Little Explorers",
+      "price_gbp": 9.99,
+      "availability_text": "In stock",
+      "description": "Illustrated bedtime stories for young children about friendly animals exploring a forest."
+    },
+    "expected_category": "children",
+    "expected_flags": []
+  },
+  {
+    "id": "case-04",
+    "label": "Reference book",
+    "input": {
+      "title": "Introduction to Botany",
+      "price_gbp": 15.0,
+      "availability_text": "In stock",
+      "description": "A structured reference guide to plant anatomy, classification, and basic botanical terminology."
+    },
+    "expected_category": "reference",
+    "expected_flags": []
+  },
+  {
+    "id": "case-05",
+    "label": "Missing description",
+    "input": {
+      "title": "Introduction to Botany",
+      "price_gbp": 15.0,
+      "availability_text": "In stock",
+      "description": ""
+    },
+    "expected_category": "reference",
+    "expected_flags": ["missing_description"]
+  },
+  {
+    "id": "case-06",
+    "label": "Ambiguous subject",
+    "input": {
+      "title": "Collected Papers",
+      "price_gbp": 18.0,
+      "availability_text": "In stock",
+      "description": "A collection of papers on several subjects."
+    },
+    "expected_category": "other",
+    "expected_flags": ["unclear_category"]
+  },
+  {
+    "id": "case-07",
+    "label": "Insufficient information",
+    "input": {
+      "title": "The Blue Door",
+      "price_gbp": 11.0,
+      "availability_text": "In stock",
+      "description": ""
+    },
+    "expected_category": "other",
+    "expected_flags": ["missing_description", "unclear_category"]
+  },
+  {
+    "id": "case-08",
+    "label": "Unusually high price",
+    "input": {
+      "title": "The Clockmaker's Secret",
+      "price_gbp": 999.99,
+      "availability_text": "In stock",
+      "description": "A fictional mystery about a clockmaker who discovers a secret hidden inside an antique clock."
+    },
+    "expected_category": "fiction",
+    "expected_flags": ["unusual_price"]
+  }
+]
